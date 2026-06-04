@@ -1,22 +1,23 @@
 <p align="center"><img src="assets/logo.png" alt="Logo" width="250px" /></p>
 <p align="center">
-<a href="https://github.com/cert-manager/aws-privateca-issuer/actions">
-<img alt="Build Status" src="https://github.com/cert-manager/aws-privateca-issuer/workflows/CI/badge.svg" />
-</a>
 <a href="https://goreportcard.com/report/github.com/cert-manager/aws-privateca-issuer">
-<img alt="Build Status" src="https://goreportcard.com/badge/github.com/cert-manager/aws-privateca-issuer" />
+<img alt="Go Report Card" src="https://goreportcard.com/badge/github.com/cert-manager/aws-privateca-issuer" />
 </a>
 <img alt="Latest version" src="https://img.shields.io/github/v/release/cert-manager/aws-privateca-issuer?color=success&sort=semver" />
 </p>
 
 # AWS Private CA Issuer
 
-AWS ACM Private CA is a module of the AWS Certificate Manager that can setup and manage private CAs.
+
+> [!TIP]
+> Amazon Elastic Kubernetes Service (EKS) supports AWS Private CA Issuer as an EKS Add-on named `aws-privateca-connector-for-kubernetes`. This simplifies installation and configuration for Amazon EKS users. See <a href="https://docs.aws.amazon.com/eks/latest/userguide/workloads-add-ons-available-eks.html#add-ons-aws-privateca-connector">AWS add-ons</ulink> for more information.
+
+AWS Private CA is an AWS service that can setup and manage private CAs, as well as issue private certificates.
 
 cert-manager is a Kubernetes add-on to automate the management and issuance of TLS certificates from various issuing sources.
-It will ensure certificates are valid and up to date periodically, and attempt to renew certificates at an appropriate time before expiry.
+It will ensure certificates are valid, updated periodically and attempt to renew certificates at an appropriate time before expiry.
 
-This project acts as an addon (see https://cert-manager.io/docs/configuration/external/) to cert-manager that signs off certificate requests using AWS PCA.
+This project acts as an addon (see https://cert-manager.io/docs/configuration/external/) to cert-manager that signs off certificate requests using AWS Private CA.
 
 ## Setup
 
@@ -31,7 +32,18 @@ helm install awspca/aws-privateca-issuer --generate-name
 
 You can check the chart configuration in the default [values](charts/aws-pca-issuer/values.yaml) file.
 
+**[AWS PCA Issuer supports ARM starting at version 1.3.0](https://github.com/cert-manager/aws-privateca-issuer/releases/tag/v1.3.0)**
 
+### Accessing the test ECR
+
+AWS PCA Issuer maintains a test ECR that contains versions that correspond to each commit on the main branch. These images can be accessed by setting the image repo to `public.ecr.aws/cert-manager-aws-privateca-issuer/cert-manager-aws-privateca-issuer-test` and the image tag to `latest`. An example of how this is done is shown below:
+
+```shell
+helm repo add awspca https://cert-manager.github.io/aws-privateca-issuer
+helm install awspca/aws-privateca-issuer --generate-name \
+--set image.repository=public.ecr.aws/cert-manager-aws-privateca-issuer/cert-manager-aws-privateca-issuer-test \
+--set image.tag=latest
+```
 ## Configuration
 
 As of now, the only configurable settings are access to AWS. So you can use `AWS_REGION`, `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`.
@@ -64,7 +76,7 @@ A minimal policy to use the issuer with an authority would look like follows:
 
 This operator provides two custom resources that you can use.
 
-Examples can be found in the [examples](config/examples/) directory.
+Examples can be found in the [examples](config/examples/) and [samples](config/samples) directories.
 
 ### AWSPCAIssuer
 
@@ -74,6 +86,10 @@ This is a regular namespaced issuer that can be used as a reference in your Cert
 
 This CR is identical to the AWSPCAIssuer. The only difference being that it's not namespaced and can be referenced from anywhere.
 
+### Usage with cert-manager Ingress Annotations
+
+The `cert-manager.io/cluster-issuer` annotation cannot be used to point at a `AWSPCAClusterIssuer`. Instead, use `cert-manager.io/issuer:`. Please see [this issue](https://github.com/cert-manager/aws-privateca-issuer/issues/252) for more information.
+
 ### Disable Approval Check
 
 The AWSPCA Issuer will wait for CertificateRequests to have an [approved condition
@@ -82,11 +98,70 @@ signing. If using an older version of cert-manager (pre v1.3), you can disable
 this check by supplying the command line flag `-disable-approved-check` to the
 Issuer Deployment.
 
+### Disable Kubernetes Client-Side Rate Limiting
+
+The AWSPCA Issuer will throttle the rate of requests to the kubernetes API server to 5 queries per second by [default](https://pkg.go.dev/k8s.io/client-go/rest#pkg-constants). This is not necessary for newer versions of Kubernetes that have implemented [API Priority and Fairness](https://kubernetes.io/docs/concepts/cluster-administration/flow-control/). If using a newer version of Kubernetes, you can disable this client-side rate limiting by supplying the command line flag `-disable-client-side-rate-limiting` to the Issuer Deployment.
+
 ### Authentication
 
 Please note that if you are using [KIAM](https://github.com/uswitch/kiam) for authentication, this plugin has been tested on KIAM v4.0. [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) is also tested and supported.
 
 There is a custom AWS authentication method we have coded into our plugin that allows a user to define a [Kubernetes secret](https://kubernetes.io/docs/concepts/configuration/secret/) with AWS Creds passed in, example [here](config/samples/secret.yaml). The user applies that file with their creds and then references the secret in their Issuer CRD when running the plugin, example [here](config/samples/awspcaclusterissuer_ec/_v1beta1_awspcaclusterissuer_ec.yaml#L8-L10).
+
+#### IAM Roles Anywhere
+
+For use cases where the AWS Private CA issuer needs to run outside of AWS, IAM Roles Anywhere can be used as an alternative to IAM Users.
+
+The helm chart supports `extraContainers` which can be used to deploy the [aws_signing_helper](https://github.com/aws/rolesanywhere-credential-helper) in "serve" mode. Then, we can set `AWS_EC2_METADATA_SERVICE_ENDPOINT="http://127.0.0.1:9911"` on the `aws-privateca-issuer` itself.
+
+A simplified example of what to set for your helm values is as follows:
+
+```
+env:
+  AWS_EC2_METADATA_SERVICE_ENDPOINT: "http://127.0.0.1:9911"
+extraContainers:
+  - name: "rolesanywhere-credential-helper"
+    image: "public.ecr.aws/rolesanywhere/credential-helper:latest"
+    command: ["aws_signing_helper"]
+    args:
+      - "serve"
+      - "--private-key"
+      - "/etc/cert/tls.key"
+      - "--certificate"
+      - "/etc/cert/tls.crt"
+      - "--role-arn"
+      - "$ROLE_ARN"
+      - "--profile-arn"
+      - "$PROFILE_ARN"
+      - "--trust-anchor-arn"
+      - "$TRUST_ANCHOR_ARN"
+    volumeMounts:
+      - name: cert
+        mountPath: /etc/cert/
+        readOnly: true
+volumes:
+  - name: cert
+    secret:
+      secretName: cert
+```
+
+#### Cross Account Assume Role
+
+You can configure the AWS Private CA issuer to assume an IAM role before making AWS Private CA API calls. This method provides flexibility for various authentication scenarios and is an alternative to AWS Resource Access Manager (RAM) sharing for cross-account use cases.
+
+When you specify a role in the `role` field, the issuer assumes that role using AWS Security Token Service (STS) before making AWS Private CA API calls.
+
+Example:
+```
+apiVersion: awspca.cert-manager.io/v1beta1
+kind: AWSPCAClusterIssuer
+metadata:
+  name: example
+spec:
+  arn: <some-pca-arn>
+  role: <some-role-arn>
+  region: <some-region>
+```
 
 ## Supported workflows
 
@@ -99,15 +174,20 @@ AWS Private Certificate Authority(PCA) Issuer Plugin supports the following inte
     * [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) - IAM roles for service accounts
     * [Kubernetes Secrets](#authentication)
     * [EC2 Instance Profiles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2_instance-profiles.html)
+    * [IAM Roles Anywhere](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html)
 
 * AWS Private CA features:
     * [End-to-End TLS encryption on Amazon Elastic Kubernetes Service](https://aws.amazon.com/blogs/containers/setting-up-end-to-end-tls-encryption-on-amazon-eks-with-the-new-aws-load-balancer-controller/)(Amazon EKS).
     * [TLS-enabled Kubernetes clusters with AWS Private CA and Amazon EKS](https://aws.amazon.com/blogs/security/tls-enabled-kubernetes-clusters-with-acm-private-ca-and-amazon-eks-2/)
     * Cross Account CA sharing with supported Cross Account templates
-    * [Supported PCA Certificate Templates](https://docs.aws.amazon.com/acm-pca/latest/userguide/UsingTemplates.html#template-varieties): CodeSigningCertificate/V1; EndEntityClientAuthCertificate/V1; EndEntityServerAuthCertificate/V1; OCSPSigningCertificate/V1; EndEntityCertificate/V1; BlankEndEntityCertificate_CSRPassthrough/V1
+    * Full support for all [PCA Certificate Templates](https://docs.aws.amazon.com/acm-pca/latest/userguide/UsingTemplates.html#template-varieties)
 
 
-## Mapping Cert-Manager Usage Types to AWS PCA Template Arns
+## Using AWS PCA Template ARNs
+
+When creating an AWSPCAIssuer or AWSPCAClusterIssuer, you can set a default template under ```spec.pcaTemplate.defaultTemplateName``` from the list of [PCA Certificate Templates](https://docs.aws.amazon.com/acm-pca/latest/userguide/UsingTemplates.html#template-varieties). When specifying an ARN, omit the part up to, and including ```:::template/```. For example, suppose you wanted to use ```arn:aws:acm-pca:::template/SubordinateCACertificate_PathLen1/V1```, then specify ```SubordinateCACertificate_PathLen1/V1``` in the issuer. See ```/config/examples/config/issuer-with-template.yaml```.
+
+This will lock all certificate requests made to that issuer into using the specified template, overriding other fields in your certificate requests. This is particularly useful if you wish to only allow certain namespaces to access a subset of all PCA templates. Some of the Usages types map to templates as well. Note that if you specify a UsageType here that conflicts with the template of the issuer, the UsageType in your request will be ignored.
 
 The code for the translation can be found [here](https://github.com/cert-manager/aws-privateca-issuer/blob/main/pkg/aws/pca.go#L177).
 
@@ -121,7 +201,7 @@ This table shows how the UsageTypes are being translated into which template to 
 | ServerAuth                 | acm-pca:::template/EndEntityServerAuthCertificate/V1             |
 | OCSPSigning                | acm-pca:::template/OCSPSigningCertificate/V1                     |
 | ClientAuth, ServerAuth     | acm-pca:::template/EndEntityCertificate/V1                       |
-| Everything Else            | acm-pca:::template/BlankEndEntityCertificate_CSRPassthrough/V1   |
+| Everything Else            | acm-pca:::template/BlankEndEntityCertificate_APICSRPassthrough/V1   |
 
 ## Understanding/Running the tests
 
@@ -159,7 +239,7 @@ Before running ```make cluster``` we will need to do the following:
 * [Golang v1.17+](https://golang.org/)
 * [Docker v17.03+](https://docs.docker.com/install/)
 * [Kind v0.9.0+](https://kind.sigs.k8s.io/docs/user/quick-start/) -> This will be installed via running the test
-* [Kubectl v1.11.3+](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
+* [Kubectl v1.13+](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
 * [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html)
 * [Helm](https://helm.sh/docs/intro/install/)
 * [Make](https://www.gnu.org/software/make/) Need to have version 3.82+
